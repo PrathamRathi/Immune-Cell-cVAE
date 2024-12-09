@@ -8,7 +8,8 @@ import scipy.sparse
 import os
 from sklearn.preprocessing import StandardScaler
 
-NUM_CLASSES = 3
+NUM_CLASSES = 4
+CELL_TYPE_NAMES = ['Monocyte', 'CD4 T cell', 'CD8 T cell','NK cell']
 
 class GeneExpressionDataset(Dataset):
     def __init__(self, expressions, cell_types):
@@ -32,7 +33,7 @@ class GeneExpressionDataset(Dataset):
         return normalized
 
 
-def preprocess_data(input_file, output_dir, cell_types=['Monocyte', 'CD4 T cell', 'NK cell']):
+def preprocess_data(input_file, output_dir, cell_types=CELL_TYPE_NAMES):
     os.makedirs(output_dir, exist_ok=True)
     adata = sc.read_h5ad(input_file)
     adata = adata[adata.obs['cell_type'].isin(cell_types)].copy()
@@ -76,14 +77,12 @@ def preprocess_data(input_file, output_dir, cell_types=['Monocyte', 'CD4 T cell'
 
 
 def make_datasets(input_file):
-    print("Loading data...")
     adata_balanced = sc.read_h5ad(input_file)
     
     # Convert to dense array if sparse
     expressions = adata_balanced.X.toarray() if scipy.sparse.issparse(adata_balanced.X) else adata_balanced.X\
     
     cell_types = pd.Categorical(adata_balanced.obs['cell_type']).codes
-    
     dataset = GeneExpressionDataset(expressions, cell_types)
     
     total_size = len(dataset)
@@ -121,4 +120,6 @@ def create_dataloaders(datasets, batch_size=128):
     }
 
 if __name__ == "__main__":
-    preprocess_data('test.h5ad', '3class')
+    #preprocess_data('test.h5ad', 'processed_data')
+    datasets = make_datasets('processed_data/processed.h5ad')
+    dataloaders = create_dataloaders(datasets, batch_size=64)

@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from tqdm import tqdm
+import matplotlib.pyplot as plt
 import preprocess
 
-NUM_CLASSES = 3
-CLASS_LOSS_ALPHA = 5
+NUM_CLASSES = 4
+CLASS_LOSS_ALPHA = 1
+KL_LOSS_ALPHA = 1
 
 class cVAE(nn.Module):
-    def __init__(self, input_dim, n_conditions, latent_dim=64, hidden_dims=[256,128]):
+    def __init__(self, input_dim, n_conditions, latent_dim=32, hidden_dims=[256,128]):
         super().__init__()
         
         self.latent_dim = latent_dim
@@ -27,7 +28,11 @@ class cVAE(nn.Module):
         
         self.encoder = nn.Sequential(*encoder_layers)
 
-        self.classifier = nn.Linear(latent_dim, n_conditions)
+        self.classifier = nn.Sequential(nn.Linear(latent_dim, int(latent_dim/2)),
+                                        nn.ReLU(),
+                                        nn.Linear(int(latent_dim/2), n_conditions),
+                                        nn.Softmax(dim=1)
+                                         )
 
         # Latent space
         self.mu = nn.Linear(hidden_dims[-1], latent_dim)
@@ -94,7 +99,7 @@ def train_epoch(model, train_loader, optimizer, device):
         kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / x.size(0)
         class_loss = F.cross_entropy(cell_type_pred, c_onehot, reduction='mean')
 
-        loss = recon_loss + kl_loss + CLASS_LOSS_ALPHA * class_loss
+        loss = recon_loss + KL_LOSS_ALPHA * kl_loss + CLASS_LOSS_ALPHA * class_loss
         
         loss.backward()
         optimizer.step()
@@ -124,9 +129,9 @@ def validate(model, val_loader, device):
             recon_x, mu, log_var, cell_type_pred = model(x, c_onehot)
             
             # Calculate losses
-            recon_loss = F.mse_loss(recon_x, x, reduction='sum') / x.size(0)
+            recon_loss = F.mse_loss(recon_x, x, reduction='mean')
             kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / x.size(0)
-            class_loss = F.cross_entropy(cell_type_pred, c_onehot)
+            class_loss = F.cross_entropy(cell_type_pred, c_onehot,reduction='mean')
 
             
             total_recon_loss += recon_loss.item()
@@ -136,7 +141,7 @@ def validate(model, val_loader, device):
     
     return total_recon_loss / num_batches, total_kl_loss / num_batches, total_class_loss / num_batches
 
-def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100):
+def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100, name='cvaeNorm'):
     # Use MPS (Metal Performance Shaders) for M2 Mac
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -147,14 +152,18 @@ def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100):
     
     # Training loop
     best_val_loss = float('inf')
-    
+    train_losses = []
+    val_losses = []
     for epoch in range(epochs):        
         train_recon_loss, train_kl_loss, train_class_loss = train_epoch(model, train_loader, optimizer, device)
         
         val_recon_loss, val_kl_loss, val_class_loss = validate(model, val_loader, device)
         
-        train_total_loss = train_recon_loss + train_kl_loss
-        val_total_loss = val_recon_loss + val_kl_loss
+        train_total_loss = train_recon_loss + train_kl_loss + train_class_loss
+        train_losses.append(train_total_loss)
+        val_total_loss = val_recon_loss + val_kl_loss + val_class_loss
+        val_losses.append(val_total_loss)
+        
         
         print(f"Epoch [{epoch+1}/{epochs}]")
         print(f"Train - Recon Loss: {train_recon_loss:.4f}, KL Loss: {train_kl_loss:.4f}, Class Loss: {train_class_loss:.4f}")
@@ -164,11 +173,38 @@ def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100):
         if val_total_loss < best_val_loss:
             best_val_loss = val_total_loss
             torch.save(model.state_dict(), 'best_cvae_model.pt')
-    
+
+    plot_loss_vs_epoch(train_losses, name + "train_loss")
+    plot_loss_vs_epoch(val_losses, name + "val_loss", type='Validation')
     return model
 
+def plot_loss_vs_epoch(losses, filename, type='Train'):
+    # Ensure the filename ends with .png for saving as an image
+    if not filename.endswith('.png'):
+        filename += '.png'
+
+    # Create the epochs array
+    epochs = range(1, len(losses) + 1)
+    
+    # Plot the graph
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, losses, marker='o', label='Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(type + ' Loss vs. Epoch')
+    plt.grid(True)
+    plt.legend()
+    
+    # Save the plot to the given filename
+    plt.savefig(filename, dpi=300)
+    print(f"Plot saved as {filename}")
+    
+    # Show the plot
+    plt.show()
+
 if __name__ == "__main__":
-    data_path = '3class/processed.h5ad'
+    print('training cvae')
+    data_path = 'processed_data/processed.h5ad'
     datasets = preprocess.make_datasets(data_path)
     dataloaders = preprocess.create_dataloaders(datasets, batch_size=64)
 
@@ -185,5 +221,8 @@ if __name__ == "__main__":
         val_loader=val_loader,
         input_dim=input_dim,
         n_conditions=NUM_CLASSES,  # number of cell types
-        epochs=25
+        epochs=30
     )
+    print('saving final model')
+    final_name = 'final_cvae.pt'
+    torch.save(model.state_dict(), final_name)

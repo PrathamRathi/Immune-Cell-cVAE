@@ -6,10 +6,23 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import os
 from cVAE import cVAE
+from cVAE_Att import cVAE_Att
 import preprocess
+from scipy import stats
+
 os.environ['MKL_NUM_THREADS'] = '1'  # To avoid potential hardware conflicts
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
-NUM_CLASSES = 3
+
+NUM_CLASSES = 4
+CELL_TYPE_NAMES = ['Monocyte', 'CD4 T cell', 'CD8 T cell','NK cell']
+
+def calculate_accuracy(predictions, true_labels):
+    # Convert probabilities to predicted class indices
+    predicted_classes = np.argmax(predictions, axis=1)
+    correct = np.sum(predicted_classes == true_labels)
+    total = true_labels.shape[0]
+    accuracy = correct / total
+    return accuracy
 
 def evaluate_cvae(model, test_loader, device):
     """
@@ -19,16 +32,17 @@ def evaluate_cvae(model, test_loader, device):
     original_data = []
     reconstructed_data = []
     cell_types = []
-    
+    classifications = []
+
     with torch.no_grad():
         for x, c in test_loader:
             x, c = x.to(device), c.to(device)
             c_onehot = torch.nn.functional.one_hot(c, num_classes=NUM_CLASSES).float()
             
             # Get reconstruction
-            recon_x, _, _ , _= model(x, c_onehot)
+            recon_x, _, _ , class_pred = model(x, c_onehot)
             
-            # Store original and reconstructed data
+            classifications.append(class_pred.cpu().numpy())
             original_data.append(x.cpu().numpy())
             reconstructed_data.append(recon_x.cpu().numpy())
             cell_types.append(c.cpu().numpy())
@@ -37,47 +51,25 @@ def evaluate_cvae(model, test_loader, device):
     original_data = np.concatenate(original_data, axis=0)
     reconstructed_data = np.concatenate(reconstructed_data, axis=0)
     cell_types = np.concatenate(cell_types, axis=0)
-    
-    return original_data, reconstructed_data, cell_types
+    classifications = np.concatenate(classifications, axis=0)
 
-def plot_dimension_reduction(original_data, reconstructed_data, cell_types, method='pca', save_path=None):
-    """
-    Create PCA visualizations for original and reconstructed data.
-    Optionally try UMAP if available and requested.
-    """
-    # Set up plot style
+    return original_data, reconstructed_data, cell_types, classifications
+
+def plot_dimension_reduction(original_data, reconstructed_data, cell_types, save_path=None):
     plt.style.use('seaborn-v0_8')
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
     
-    # Scale data
     scaler = StandardScaler()
-    original_scaled = scaler.fit_transform(original_data)
-    reconstructed_scaled = scaler.transform(reconstructed_data)
+    original_scaled = original_data#scaler.fit_transform(original_data)
+    reconstructed_scaled = reconstructed_data#scaler.transform(reconstructed_data)
     
     try:
-        # if method.lower() == 'umap':
-        #     # Try importing UMAP - if it fails, fall back to PCA
-        #     try:
-        #         print('trying to import UMAP')
-        #         from umap import UMAP
-        #         print('imported')
-        #         reducer = UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
-        #         print("Using UMAP for dimensionality reduction...")
-        #     except:
-        #         print("UMAP import failed, falling back to PCA...")
-        #         reducer = PCA(n_components=2, random_state=42)
-        # else:
         reducer = PCA(n_components=2, random_state=42)
         print("Using PCA for dimensionality reduction...")
-        
-        # Compute embeddings
-        print("Computing embedding for original data...")
         original_embedding = reducer.fit_transform(original_scaled)
-        print("Computing embedding for reconstructed data...")
         reconstructed_embedding = reducer.fit_transform(reconstructed_scaled)
         
-        # Color mapping for cell types
-        cell_type_names = ['Monocyte', 'CD4 T cell', 'NK cell']
+        cell_type_names = CELL_TYPE_NAMES
         colors = sns.color_palette('husl', n_colors=len(cell_type_names))
         
         # Plot original data
@@ -85,7 +77,7 @@ def plot_dimension_reduction(original_data, reconstructed_data, cell_types, meth
             mask = cell_types == cell_type
             ax1.scatter(original_embedding[mask, 0], original_embedding[mask, 1], 
                        c=[colors[i]], label=cell_type_names[i], alpha=0.6)
-        ax1.set_title(f'Original Data ({method.upper()})')
+        ax1.set_title(f'Original Data PCA')
         ax1.legend()
         
         # Plot reconstructed data
@@ -93,7 +85,7 @@ def plot_dimension_reduction(original_data, reconstructed_data, cell_types, meth
             mask = cell_types == cell_type
             ax2.scatter(reconstructed_embedding[mask, 0], reconstructed_embedding[mask, 1], 
                        c=[colors[i]], label=cell_type_names[i], alpha=0.6)
-        ax2.set_title(f'Reconstructed Data ({method.upper()})')
+        ax2.set_title(f'Reconstructed Data PCA')
         ax2.legend()
         
         plt.tight_layout()
@@ -104,7 +96,14 @@ def plot_dimension_reduction(original_data, reconstructed_data, cell_types, meth
         
     except Exception as e:
         print(f"Error during dimensionality reduction: {str(e)}")
-        print("Please try using method='pca' if you encountered issues with UMAP")
+
+def spearman_correlation(original, reconstructed):
+    correlations = []
+    for i in range(original.shape[0]):
+        corr, _ = stats.spearmanr(original[i], 
+                                 reconstructed[i])
+        correlations.append(corr)
+    return np.mean(correlations)
 
 def compute_metrics(original_data, reconstructed_data, cell_types):
     """
@@ -112,7 +111,7 @@ def compute_metrics(original_data, reconstructed_data, cell_types):
     """
     # Mean squared error per cell type
     mse_by_type = {}
-    for i, cell_type in enumerate(['Monocyte', 'CD4 T cell', 'NK cell']):
+    for i, cell_type in enumerate(CELL_TYPE_NAMES):
         mask = cell_types == i
         mse = np.mean((original_data[mask] - reconstructed_data[mask]) ** 2)
         mse_by_type[cell_type] = mse
@@ -151,23 +150,29 @@ def main():
 
     test_loader = dataloaders['test']
 
-    # Load your model (adjust parameters as needed)
     model = cVAE(input_dim=input_dim, n_conditions=NUM_CLASSES).to(device)
     model.load_state_dict(torch.load('best_cvae_model.pt'))
     model.eval()
-    
+    pca_path = "pca_cvae.png"
+
+    # model = cVAE_Att(input_dim=input_dim, n_conditions=NUM_CLASSES).to(device)
+    # model.load_state_dict(torch.load('best_cvae_att_balanced.pt'))
+    # model.eval()
+    # pca_path = "pca_bestbalanced.png"
+
     # Evaluate model
     print("Evaluating model...")
-    original_data, reconstructed_data, cell_types = evaluate_cvae(model, test_loader, device)
+    original_data, reconstructed_data, labels, classifications = evaluate_cvae(model, test_loader, device)
     
-    # Try both PCA and UMAP
     print("\nGenerating PCA visualization...")
-    plot_dimension_reduction(original_data, reconstructed_data, cell_types, 
-                           method='pca', save_path='pca_comparison.png')
+    plot_dimension_reduction(original_data, reconstructed_data, labels, 
+                          save_path=pca_path)
     
-    # Compute and display metrics
     print("\nComputing metrics...")
-    compute_metrics(original_data, reconstructed_data, cell_types)
+    compute_metrics(original_data, reconstructed_data, labels)
+
+    accuracy = calculate_accuracy(classifications, labels)
+    print("\nAccuracy: " + str(accuracy))
 
 if __name__ == "__main__":
     main()
