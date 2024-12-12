@@ -147,7 +147,6 @@ def inspect_adata(adata):
     else:
         print("No variable matrices found")
 
-# Example usage
 if __name__ == "__main__":
     # Specify cell types to filter
     cell_types_to_keep = ['CD4 T cell'] #['Monocyte', 'CD4 T cell', 'NK cell']

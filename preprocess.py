@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 import scipy.sparse
 import os
 from sklearn.preprocessing import StandardScaler
+import mygene
 
 NUM_CLASSES = 4
 CELL_TYPE_NAMES = ['Monocyte', 'CD4 T cell', 'CD8 T cell','NK cell']
@@ -27,9 +28,9 @@ class GeneExpressionDataset(Dataset):
         return self.expressions[idx], self.cell_types[idx]
     
     def normalize_data(self, data):
-        scaler = StandardScaler()
-        normalized = scaler.fit_transform(data)
-        
+        # scaler = StandardScaler()
+        # normalized = scaler.fit_transform(data)
+        normalized = data
         return normalized
 
 
@@ -78,7 +79,7 @@ def preprocess_data(input_file, output_dir, cell_types=CELL_TYPE_NAMES):
 
 def make_datasets(input_file):
     adata_balanced = sc.read_h5ad(input_file)
-    
+    var_names = adata_balanced.var_names.to_list()
     # Convert to dense array if sparse
     expressions = adata_balanced.X.toarray() if scipy.sparse.issparse(adata_balanced.X) else adata_balanced.X\
     
@@ -95,7 +96,7 @@ def make_datasets(input_file):
         [train_size, val_size, test_size],
         generator=torch.Generator().manual_seed(42)  # for reproducibility
     )
-    
+    symbols = get_gene_symbols(var_names)
     print(f"""
     Dataset splits:
     - Total cells: {total_size}
@@ -109,17 +110,34 @@ def make_datasets(input_file):
         'val_dataset': val_dataset,
         'test_dataset': test_dataset,
         'n_genes': adata_balanced.n_vars,
-        'n_cell_types': len(np.unique(cell_types))
+        'n_cell_types': len(np.unique(cell_types)),
+        'gene_names': var_names,
+        'gene_symbols': symbols
     }
 
 def create_dataloaders(datasets, batch_size=128):
     return {
         'train': DataLoader(datasets['train_dataset'], batch_size=batch_size, shuffle=True),
         'val': DataLoader(datasets['val_dataset'], batch_size=batch_size),
-        'test': DataLoader(datasets['test_dataset'], batch_size=batch_size)
+        'test': DataLoader(datasets['test_dataset'], batch_size=batch_size),
+        'gene_names': datasets['gene_names']
     }
 
+
+def get_gene_symbols(ensembl_ids):
+    mg = mygene.MyGeneInfo()
+    results = mg.querymany(ensembl_ids, scopes='ensembl.gene', fields='symbol', species='human', verbose=False)
+    
+    # Create a dictionary of mappings
+    id_to_symbol = {result['query']: result.get('symbol', result['query']) for result in results}
+    
+    # Create final list in same order as input
+    final_list = [id_to_symbol.get(ensembl_id, ensembl_id) for ensembl_id in ensembl_ids]
+    
+    return final_list
+
+
 if __name__ == "__main__":
-    #preprocess_data('test.h5ad', 'processed_data')
+    # preprocess_data('test.h5ad', 'processed_data')
     datasets = make_datasets('processed_data/processed.h5ad')
     dataloaders = create_dataloaders(datasets, batch_size=64)

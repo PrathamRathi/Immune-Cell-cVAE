@@ -10,14 +10,10 @@ from cVAE_Att import cVAE_Att
 import preprocess
 from scipy import stats
 
-os.environ['MKL_NUM_THREADS'] = '1'  # To avoid potential hardware conflicts
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-
 NUM_CLASSES = 4
 CELL_TYPE_NAMES = ['Monocyte', 'CD4 T cell', 'CD8 T cell','NK cell']
 
 def calculate_accuracy(predictions, true_labels):
-    # Convert probabilities to predicted class indices
     predicted_classes = np.argmax(predictions, axis=1)
     correct = np.sum(predicted_classes == true_labels)
     total = true_labels.shape[0]
@@ -59,9 +55,8 @@ def plot_dimension_reduction(original_data, reconstructed_data, cell_types, save
     plt.style.use('seaborn-v0_8')
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
     
-    scaler = StandardScaler()
-    original_scaled = original_data#scaler.fit_transform(original_data)
-    reconstructed_scaled = reconstructed_data#scaler.transform(reconstructed_data)
+    original_scaled = original_data
+    reconstructed_scaled = reconstructed_data
     
     try:
         reducer = PCA(n_components=2, random_state=42)
@@ -105,38 +100,57 @@ def spearman_correlation(original, reconstructed):
         correlations.append(corr)
     return np.mean(correlations)
 
-def compute_metrics(original_data, reconstructed_data, cell_types):
-    """
-    Compute evaluation metrics for the reconstructions.
-    """
-    # Mean squared error per cell type
+def pearson_correlation(original, reconstructed):
+    correlations = []
+    for i in range(original.shape[0]):
+        corr, _ = stats.pearsonr(original[i], 
+                                 reconstructed[i])
+        correlations.append(corr)
+    return np.mean(correlations)
+
+
+def compute_metrics(original_data, reconstructed_data, cell_types, classifications):
     mse_by_type = {}
+    pearson_by_type = {}
+    spearman_by_type = {}
+
+    total_pearson = 0
+    total_spearman = 0
     for i, cell_type in enumerate(CELL_TYPE_NAMES):
         mask = cell_types == i
         mse = np.mean((original_data[mask] - reconstructed_data[mask]) ** 2)
         mse_by_type[cell_type] = mse
-    
-    # Overall MSE
+
+        spearman = spearman_correlation(original_data[mask], reconstructed_data[mask])
+        total_spearman += spearman
+        spearman_by_type[cell_type] = spearman
+
+        pearson = pearson_correlation(original_data[mask], reconstructed_data[mask])
+        total_pearson += pearson
+        pearson_by_type[cell_type] = pearson
+
     total_mse = np.mean((original_data - reconstructed_data) ** 2)
     
-    # Correlation between original and reconstructed data
-    correlations = []
-    for i in range(len(original_data)):
-        try:
-            corr = np.corrcoef(original_data[i], reconstructed_data[i])[0,1]
-            if not np.isnan(corr):
-                correlations.append(corr)
-        except:
-            continue
-    
-    mean_correlation = np.mean(correlations)
     
     print("\nReconstruction Metrics:")
     print(f"Overall MSE: {total_mse:.4f}")
-    print(f"Mean Correlation: {mean_correlation:.4f}")
     print("\nMSE by Cell Type:")
     for cell_type, mse in mse_by_type.items():
         print(f"{cell_type}: {mse:.4f}")
+    
+    print("\nPearson by Cell Type:")
+    for cell_type, p in pearson_by_type.items():
+        print(f"{cell_type}: {p:.4f}")
+    print(f"\nAverage Pearson: {total_pearson/4:.4f}")
+
+    print("\nSpearman by Cell Type:")
+    for cell_type, s in spearman_by_type.items():
+        print(f"{cell_type}: {s:.4f}")
+    print(f"\nAverage Spearman: {total_spearman/4:.4f}")
+
+
+    accuracy = calculate_accuracy(classifications, cell_types)
+    print("\nAccuracy: " + str(accuracy))
 
 def main():
     # Load trained model
@@ -150,29 +164,32 @@ def main():
 
     test_loader = dataloaders['test']
 
-    model = cVAE(input_dim=input_dim, n_conditions=NUM_CLASSES).to(device)
-    model.load_state_dict(torch.load('best_cvae_model.pt'))
-    model.eval()
-    pca_path = "pca_cvae.png"
-
-    # model = cVAE_Att(input_dim=input_dim, n_conditions=NUM_CLASSES).to(device)
-    # model.load_state_dict(torch.load('best_cvae_att_balanced.pt'))
+    # base_name = 'final_cvae_reg_KL1_class1_recon1_epochs15NoNormal'
+    # model = cVAE(input_dim=input_dim, n_conditions=NUM_CLASSES).to(device)
+    # model.load_state_dict(torch.load(base_name + '.pt'))
     # model.eval()
-    # pca_path = "pca_bestbalanced.png"
+    # pca_path = 'pca_' + base_name + '.png'
 
-    # Evaluate model
-    print("Evaluating model...")
-    original_data, reconstructed_data, labels, classifications = evaluate_cvae(model, test_loader, device)
+    names = ['final_cvae_att_KL0.7_class1.4_recon1_epochs15NoNormal', 'final_cvae_att_KL1_class0_recon0.7_epochs15NoNormal', 
+         'final_cvae_att_KL1_class1_recon1_epochs15NoNormal']
     
-    print("\nGenerating PCA visualization...")
-    plot_dimension_reduction(original_data, reconstructed_data, labels, 
-                          save_path=pca_path)
-    
-    print("\nComputing metrics...")
-    compute_metrics(original_data, reconstructed_data, labels)
+    for name in names:
+        base_name = name
+        model = cVAE_Att(input_dim=input_dim, n_conditions=NUM_CLASSES).to(device)
+        model.load_state_dict(torch.load(base_name + '.pt'))
+        model.eval()
+        pca_path = 'pca_' + base_name + '.png'
 
-    accuracy = calculate_accuracy(classifications, labels)
-    print("\nAccuracy: " + str(accuracy))
+        # Evaluate model
+        print("Evaluating model...")
+        original_data, reconstructed_data, labels, classifications = evaluate_cvae(model, test_loader, device)
+        
+        # print("\nGenerating PCA visualization...")
+        # plot_dimension_reduction(original_data, reconstructed_data, labels, 
+        #                     save_path='pca/' + pca_path)
+        
+        print("\nComputing metrics...")
+        compute_metrics(original_data, reconstructed_data, labels, classifications)
 
 if __name__ == "__main__":
     main()

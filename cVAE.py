@@ -8,9 +8,10 @@ import preprocess
 NUM_CLASSES = 4
 CLASS_LOSS_ALPHA = 1
 KL_LOSS_ALPHA = 1
+RECON_LOSS_ALPHA = 1
 
 class cVAE(nn.Module):
-    def __init__(self, input_dim, n_conditions, latent_dim=32, hidden_dims=[256,128]):
+    def __init__(self, input_dim, n_conditions, latent_dim=32, hidden_dims=[128]):
         super().__init__()
         
         self.latent_dim = latent_dim
@@ -91,15 +92,13 @@ def train_epoch(model, train_loader, optimizer, device):
         
         optimizer.zero_grad()
         
-        # Forward pass
         recon_x, mu, log_var, cell_type_pred = model(x, c_onehot)
         
-        # Calculate losses
         recon_loss = F.mse_loss(recon_x, x, reduction='mean')
         kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / x.size(0)
         class_loss = F.cross_entropy(cell_type_pred, c_onehot, reduction='mean')
 
-        loss = recon_loss + KL_LOSS_ALPHA * kl_loss + CLASS_LOSS_ALPHA * class_loss
+        loss = RECON_LOSS_ALPHA * recon_loss + KL_LOSS_ALPHA * kl_loss + CLASS_LOSS_ALPHA * class_loss
         
         loss.backward()
         optimizer.step()
@@ -122,13 +121,10 @@ def validate(model, val_loader, device):
         for x, c in val_loader:
             x, c = x.to(device), c.to(device)
             
-            # Convert cell types to one-hot
             c_onehot = F.one_hot(c, num_classes=NUM_CLASSES).float() 
             
-            # Forward pass
             recon_x, mu, log_var, cell_type_pred = model(x, c_onehot)
             
-            # Calculate losses
             recon_loss = F.mse_loss(recon_x, x, reduction='mean')
             kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / x.size(0)
             class_loss = F.cross_entropy(cell_type_pred, c_onehot,reduction='mean')
@@ -141,16 +137,14 @@ def validate(model, val_loader, device):
     
     return total_recon_loss / num_batches, total_kl_loss / num_batches, total_class_loss / num_batches
 
-def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100, name='cvaeNorm'):
+def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100, name='cvae'):
     # Use MPS (Metal Performance Shaders) for M2 Mac
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Initialize model
     model = cVAE(input_dim=input_dim, n_conditions=n_conditions).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     
-    # Training loop
     best_val_loss = float('inf')
     train_losses = []
     val_losses = []
@@ -172,21 +166,19 @@ def train_cvae(train_loader, val_loader, input_dim, n_conditions=4, epochs=100, 
         # Save best model
         if val_total_loss < best_val_loss:
             best_val_loss = val_total_loss
-            torch.save(model.state_dict(), 'best_cvae_model.pt')
+            torch.save(model.state_dict(), 'best_cvae_reg_' + name + '.pt')
 
     plot_loss_vs_epoch(train_losses, name + "train_loss")
     plot_loss_vs_epoch(val_losses, name + "val_loss", type='Validation')
     return model
 
 def plot_loss_vs_epoch(losses, filename, type='Train'):
-    # Ensure the filename ends with .png for saving as an image
     if not filename.endswith('.png'):
         filename += '.png'
 
-    # Create the epochs array
+    filename = 'reg_loss/' + filename
     epochs = range(1, len(losses) + 1)
     
-    # Plot the graph
     plt.figure(figsize=(8, 6))
     plt.plot(epochs, losses, marker='o', label='Loss')
     plt.xlabel('Epoch')
@@ -195,11 +187,9 @@ def plot_loss_vs_epoch(losses, filename, type='Train'):
     plt.grid(True)
     plt.legend()
     
-    # Save the plot to the given filename
     plt.savefig(filename, dpi=300)
     print(f"Plot saved as {filename}")
     
-    # Show the plot
     plt.show()
 
 if __name__ == "__main__":
@@ -214,15 +204,18 @@ if __name__ == "__main__":
     sample_batch, _ = next(iter(train_loader))
     input_dim = sample_batch.shape[1]
     print(sample_batch.shape)
+    epochs = 15
+    name = f'KL{KL_LOSS_ALPHA}_class{CLASS_LOSS_ALPHA}_recon{RECON_LOSS_ALPHA}_epochs{epochs}NoNormal'
+    print(name)
 
-    # Train model
     model = train_cvae(
         train_loader=train_loader,
         val_loader=val_loader,
         input_dim=input_dim,
         n_conditions=NUM_CLASSES,  # number of cell types
-        epochs=30
+        name = name,
+        epochs=epochs
     )
     print('saving final model')
-    final_name = 'final_cvae.pt'
+    final_name = 'final_cvae_reg_' + name + '.pt'
     torch.save(model.state_dict(), final_name)
