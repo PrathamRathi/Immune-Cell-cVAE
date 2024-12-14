@@ -1,3 +1,4 @@
 *.csv
 *.h5ad
 *.pt
+*.png

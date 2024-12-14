@@ -128,10 +128,8 @@ def get_gene_symbols(ensembl_ids):
     mg = mygene.MyGeneInfo()
     results = mg.querymany(ensembl_ids, scopes='ensembl.gene', fields='symbol', species='human', verbose=False)
     
-    # Create a dictionary of mappings
     id_to_symbol = {result['query']: result.get('symbol', result['query']) for result in results}
     
-    # Create final list in same order as input
     final_list = [id_to_symbol.get(ensembl_id, ensembl_id) for ensembl_id in ensembl_ids]
     
     return final_list
